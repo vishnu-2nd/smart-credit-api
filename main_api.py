@@ -434,8 +434,11 @@ def normalize_report(raw: dict, scores: dict):
         trades = [trades]
 
     for trade in trades:
+        inst = trade.get("institution") or {}
         acct = {
-            "institution": {"name": trade.get("institution", {}).get("name") or trade.get("creditorName") or trade.get("memberCodeShortName")},
+            "institution": {
+                "name": inst.get("name") or trade.get("creditorName") or trade.get("memberCodeShortName")
+            },
             "account_type": (
                 (trade.get("accountTypeObj") or {}).get("description")
                 or trade.get("accountTypeDescription")
