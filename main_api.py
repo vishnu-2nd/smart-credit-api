@@ -357,78 +357,151 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
     return {"aggregated": aggregated, "scores": scores}
 def normalize_report(raw: dict, scores: dict):
     """
-    Convert raw SmartCredit JSON into normalized structure.
-    Keeps summary, accounts, scores, inquiries, public records.
+    Normalize raw SmartCredit JSON into the structure expected by the client.
+    Includes personal info, scores, tradelines with bureau, inquiries,
+    public records, and employers.
     """
 
+    def safe_number(val):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     normalized = {
-        "scores": scores,
+        "personal_info": {},
+        "scores": scores or {},
         "summary": {},
         "accounts": [],
         "inquiries": [],
-        "public_records": []
+        "public_records": [],
+        "employers": []
     }
 
-    # --- Scores ---
-    if scores:
-        normalized["scores"] = scores
+    # --- Personal Info (from credit_report_json) ---
+    cr_json = raw.get("credit_report_json", {})
+    if isinstance(cr_json, dict):
+        borrower = cr_json.get("Borrower", {}) or {}
+        addr = (borrower.get("BorrowerAddress") or {}).get("CreditAddress", {}) or {}
+        address_parts = [
+            addr.get("Street"),
+            addr.get("City"),
+            addr.get("State"),
+            addr.get("PostalCode"),
+        ]
+        normalized["personal_info"] = {
+            "name": borrower.get("BorrowerName"),
+            "ssn": (borrower.get("SocialPartition") or {}).get("Social"),
+            "date_of_birth": (borrower.get("Birth") or {}).get("date"),
+            "address": ", ".join([p for p in address_parts if p])
+        }
+
+    # --- Scores (fallback to credit_report_json if missing) ---
+    if not normalized["scores"] and isinstance(cr_json, dict):
+        comps = (cr_json.get("BundleComponents") or {}).get("BundleComponent", [])
+        if isinstance(comps, dict):  # handle single object
+            comps = [comps]
+        for comp in comps:
+            bureau = comp.get("Type")
+            cs = comp.get("CreditScoreType") or {}
+            score = cs.get("riskScore") or cs.get("score")
+            if score and bureau:
+                if "TUC" in bureau:
+                    normalized["scores"]["TransUnion"] = score
+                elif "EQF" in bureau:
+                    normalized["scores"]["Equifax"] = score
+                elif "EXP" in bureau:
+                    normalized["scores"]["Experian"] = score
 
     # --- Summary (statistics endpoint) ---
     stats = raw.get("statistics", {})
     if isinstance(stats, dict):
         normalized["summary"] = {
-            "total_accounts": stats.get("totalAccounts"),
-            "open_accounts": stats.get("openAccounts"),
-            "closed_accounts": stats.get("closedAccounts"),
-            "delinquent_accounts": stats.get("delinquentAccounts"),
-            "derogatory_accounts": stats.get("derogatoryAccounts"),
-            "total_balances": stats.get("totalBalances"),
-            "total_payments": stats.get("totalPayments"),
-            "public_records": stats.get("publicRecords"),
-            "inquiries_2yrs": stats.get("inquiriesLast2Years"),
+            "total_accounts": safe_number(stats.get("totalAccounts")),
+            "open_accounts": safe_number(stats.get("openAccounts")),
+            "closed_accounts": safe_number(stats.get("closedAccounts")),
+            "delinquent_accounts": safe_number(stats.get("delinquentAccounts")),
+            "derogatory_accounts": safe_number(stats.get("derogatoryAccounts")),
+            "total_balances": safe_number(stats.get("totalBalances")),
+            "total_payments": safe_number(stats.get("totalPayments")),
+            "public_records": safe_number(stats.get("publicRecords")),
+            "inquiries_2yrs": safe_number(stats.get("inquiriesLast2Years")),
         }
 
-    # --- Accounts (trades endpoint) ---
-    trades = raw.get("trades", {}).get("trades", [])
+    # --- Accounts (Trades endpoint) ---
+    trades = (raw.get("trades") or {}).get("trades", [])
+    if isinstance(trades, dict):  # handle single object
+        trades = [trades]
     for trade in trades:
         acct = {
-            "account_name": trade.get("memberCodeShortName"),
-            "account_number": trade.get("accountNumber"),
-            "account_type": trade.get("accountType"),
-            "status": trade.get("accountRating"),
-            "balance": trade.get("currentBalance"),
-            "credit_limit": trade.get("creditLimit"),
-            "high_balance": trade.get("highBalance"),
-            "open_date": trade.get("openDate"),
+            "institution": {"name": trade.get("creditorName") or trade.get("memberCodeShortName")},
+            "account_type": (
+                trade.get("accountTypeDescription")
+                or (trade.get("accountTypeObj") or {}).get("description")
+                or trade.get("accountType")
+            ),
+            "bureau": trade.get("creditorContactSource") or trade.get("bureau"),
+            "status": (
+                trade.get("accountStatus")
+                or trade.get("currentAccountRatingDisplay")
+                or trade.get("accountRating")
+            ),
+            "balance": safe_number(trade.get("currentBalance") or trade.get("currentBalanceAmount")),
+            "credit_limit": safe_number(trade.get("creditLimit") or trade.get("creditLimitAmount")),
+            "high_balance": safe_number(trade.get("highBalance") or trade.get("highCreditAmount")),
+            "open_date": trade.get("openDate") or trade.get("openDateFormatted"),
             "closed_date": trade.get("dateClosed"),
             "last_payment_date": trade.get("dateLastPayment"),
-            "payment_amount": trade.get("scheduledMonthlyPayment"),
-            "past_due": trade.get("amountPastDue"),
+            "payment_amount": safe_number(trade.get("scheduledMonthlyPayment") or trade.get("termsMonthlyPayment")),
+            "past_due": safe_number(trade.get("amountPastDue")),
+            "account_number": trade.get("maskedAccountNumber") or trade.get("accountNumber"),
+            "payment_history": trade.get("paymentHistory"),
+            "times_30_late": safe_number(trade.get("times30Late")),
+            "times_60_late": safe_number(trade.get("times60Late")),
+            "times_90_late": safe_number(trade.get("times90Late")),
             "remarks": trade.get("accountRemark"),
+            "last_reported": trade.get("lastReported"),
+            "account_age": trade.get("accountAge"),
         }
         normalized["accounts"].append(acct)
 
-    # --- Inquiries (search_results endpoint) ---
-    inqs = raw.get("search_results", {}).get("inquiries", [])
+    # --- Inquiries ---
+    inqs = (raw.get("search_results") or {}).get("inquiries", [])
+    if isinstance(inqs, dict):  # handle single object
+        inqs = [inqs]
     for iq in inqs:
         normalized["inquiries"].append({
             "bureau": iq.get("bureau"),
             "business_name": iq.get("subscriberName"),
             "inquiry_date": iq.get("inquiryDate"),
-            "type": iq.get("inquiryType")
+            "type": iq.get("inquiryType"),
         })
 
     # --- Public Records ---
-    pr = raw.get("search_results", {}).get("publicRecords", [])
-    for record in pr:
+    prs = (raw.get("search_results") or {}).get("publicRecords", [])
+    if isinstance(prs, dict):
+        prs = [prs]
+    for pr in prs:
         normalized["public_records"].append({
-            "type": record.get("type"),
-            "date_filed": record.get("dateFiled"),
-            "status": record.get("status"),
-            "amount": record.get("amount")
+            "type": pr.get("type"),
+            "date_filed": pr.get("dateFiled"),
+            "status": pr.get("status"),
+            "amount": safe_number(pr.get("amount")),
+        })
+
+    # --- Employers (from credit_report_json) ---
+    employers = (cr_json.get("Borrower") or {}).get("Employer", []) or []
+    if isinstance(employers, dict):
+        employers = [employers]
+    for emp in employers:
+        normalized["employers"].append({
+            "name": emp.get("employerName"),
+            "date_reported": emp.get("dateReported"),
+            "bureau": emp.get("bureau"),
         })
 
     return normalized
+
 
 # -----------------------------
 # Routes
