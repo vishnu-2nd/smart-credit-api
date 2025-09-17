@@ -358,8 +358,8 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
 def normalize_report(raw: dict, scores: dict):
     """
     Normalize raw SmartCredit JSON into the structure expected by the client.
-    Includes personal info, scores, tradelines with bureau, inquiries,
-    public records, and employers.
+    Includes personal info, scores, summary, tradelines with bureau,
+    inquiries, public records, and employers.
     """
 
     def safe_number(val):
@@ -378,7 +378,7 @@ def normalize_report(raw: dict, scores: dict):
         "employers": []
     }
 
-    # --- Personal Info (from credit_report_json) ---
+    # --- Personal Info (credit_report_json) ---
     cr_json = raw.get("credit_report_json", {})
     if isinstance(cr_json, dict):
         borrower = cr_json.get("Borrower", {}) or {}
@@ -396,7 +396,7 @@ def normalize_report(raw: dict, scores: dict):
             "address": ", ".join([p for p in address_parts if p])
         }
 
-    # --- Scores (fallback to credit_report_json if missing) ---
+    # --- Scores (fallback to credit_report_json if empty) ---
     if not normalized["scores"] and isinstance(cr_json, dict):
         comps = (cr_json.get("BundleComponents") or {}).get("BundleComponent", [])
         if isinstance(comps, dict):  # handle single object
@@ -428,25 +428,27 @@ def normalize_report(raw: dict, scores: dict):
             "inquiries_2yrs": safe_number(stats.get("inquiriesLast2Years")),
         }
 
-    # --- Accounts (Trades endpoint) ---
+    # --- Accounts (trades endpoint) ---
     trades = (raw.get("trades") or {}).get("trades", [])
-    if isinstance(trades, dict):  # handle single object
+    if isinstance(trades, dict):  # normalize single object
         trades = [trades]
+
     for trade in trades:
         acct = {
-            "institution": {"name": trade.get("creditorName") or trade.get("memberCodeShortName")},
+            "institution": {"name": trade.get("institution", {}).get("name") or trade.get("creditorName") or trade.get("memberCodeShortName")},
             "account_type": (
-                trade.get("accountTypeDescription")
-                or (trade.get("accountTypeObj") or {}).get("description")
+                (trade.get("accountTypeObj") or {}).get("description")
+                or trade.get("accountTypeDescription")
                 or trade.get("accountType")
+                or trade.get("type")
             ),
-            "bureau": trade.get("creditorContactSource") or trade.get("bureau"),
+            "bureau": trade.get("creditorContactSource") or trade.get("bureau") or trade.get("source"),
             "status": (
                 trade.get("accountStatus")
                 or trade.get("currentAccountRatingDisplay")
                 or trade.get("accountRating")
             ),
-            "balance": safe_number(trade.get("currentBalance") or trade.get("currentBalanceAmount")),
+            "balance": safe_number(trade.get("currentBalance") or trade.get("currentBalanceAmount") or trade.get("balance")),
             "credit_limit": safe_number(trade.get("creditLimit") or trade.get("creditLimitAmount")),
             "high_balance": safe_number(trade.get("highBalance") or trade.get("highCreditAmount")),
             "open_date": trade.get("openDate") or trade.get("openDateFormatted"),
@@ -465,9 +467,9 @@ def normalize_report(raw: dict, scores: dict):
         }
         normalized["accounts"].append(acct)
 
-    # --- Inquiries ---
+    # --- Inquiries (search_results endpoint) ---
     inqs = (raw.get("search_results") or {}).get("inquiries", [])
-    if isinstance(inqs, dict):  # handle single object
+    if isinstance(inqs, dict):
         inqs = [inqs]
     for iq in inqs:
         normalized["inquiries"].append({
@@ -489,14 +491,14 @@ def normalize_report(raw: dict, scores: dict):
             "amount": safe_number(pr.get("amount")),
         })
 
-    # --- Employers (from credit_report_json) ---
+    # --- Employers (credit_report_json) ---
     employers = (cr_json.get("Borrower") or {}).get("Employer", []) or []
     if isinstance(employers, dict):
         employers = [employers]
     for emp in employers:
         normalized["employers"].append({
             "name": emp.get("employerName"),
-            "date_reported": emp.get("dateReported"),
+            "date_reported": emp.get("dateReported") or emp.get("dateUpdated"),
             "bureau": emp.get("bureau"),
         })
 
