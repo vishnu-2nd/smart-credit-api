@@ -150,10 +150,10 @@
 #     port = int(os.getenv("PORT", "5000"))
 #     app.run(host="0.0.0.0", port=port)
 ## Above is with raw JSON
+
 #!/usr/bin/env python3
 """
-main_api.py - Fetch SmartCredit report data via Playwright
-Returns both RAW and NORMALIZED JSON in the response.
+main_api.py - Fetch raw + normalized SmartCredit report data via Playwright
 """
 
 import os
@@ -196,7 +196,7 @@ CREDIT_REPORT_HTML = "https://www.smartcredit.com/member/credit-report/smart-3b/
 
 
 # -----------------------------
-# Fetch report
+# Fetch Report
 # -----------------------------
 def fetch_report_for_credentials(email: str, password: str, headless: bool = PLAYWRIGHT_HEADLESS, timeout_ms: int = REQUEST_TIMEOUT_MS):
     aggregated = {}
@@ -235,18 +235,19 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
         # --- Scrape HTML scores ---
         try:
             page.goto(CREDIT_REPORT_HTML, wait_until="domcontentloaded", timeout=timeout_ms)
+            tu = exp = eqf = None
             try:
                 tu = page.inner_text("div.border-transunion h1.fw-bold", timeout=3000).strip()
             except Exception:
-                tu = None
+                pass
             try:
                 exp = page.inner_text("div.border-experian h1.fw-bold", timeout=3000).strip()
             except Exception:
-                exp = None
+                pass
             try:
                 eqf = page.inner_text("div.border-equifax h1.fw-bold", timeout=3000).strip()
             except Exception:
-                eqf = None
+                pass
 
             if tu:
                 scores["TransUnion"] = tu
@@ -263,12 +264,11 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
 
 
 # -----------------------------
-# Normalization
+# Normalize Report
 # -----------------------------
 def normalize_report(raw: dict, scores: dict):
-    """
-    Normalize raw SmartCredit JSON into the structure expected by the client.
-    """
+    """Normalize raw SmartCredit JSON into client’s expected structure."""
+
     def safe_number(val):
         try:
             return float(val)
@@ -285,24 +285,30 @@ def normalize_report(raw: dict, scores: dict):
         "employers": []
     }
 
-    # Personal info
+    # --- Personal Info ---
     cr_json = raw.get("credit_report_json", {})
     if isinstance(cr_json, dict):
         borrower = cr_json.get("Borrower", {}) or {}
-        addr = (borrower.get("BorrowerAddress") or {}).get("CreditAddress", {}) or {}
+        # BorrowerAddress may be dict or list
+        addr = borrower.get("BorrowerAddress") or {}
+        if isinstance(addr, list) and addr:
+            addr = addr[0]
+        addr = addr.get("CreditAddress", {}) if isinstance(addr, dict) else {}
+        address_parts = [addr.get("Street"), addr.get("City"), addr.get("State"), addr.get("PostalCode")]
+
+        # Birth may be list
+        birth = borrower.get("Birth")
+        if isinstance(birth, list) and birth:
+            birth = birth[0]
+
         normalized["personal_info"] = {
             "name": borrower.get("BorrowerName"),
             "ssn": (borrower.get("SocialPartition") or {}).get("Social"),
-            "date_of_birth": (borrower.get("Birth") or {}).get("date"),
-            "address": ", ".join(filter(None, [
-                addr.get("Street"),
-                addr.get("City"),
-                addr.get("State"),
-                addr.get("PostalCode"),
-            ]))
+            "date_of_birth": (birth or {}).get("date"),
+            "address": ", ".join([p for p in address_parts if p])
         }
 
-    # Scores (fallback)
+    # --- Scores ---
     if not normalized["scores"] and isinstance(cr_json, dict):
         comps = (cr_json.get("BundleComponents") or {}).get("BundleComponent", [])
         if isinstance(comps, dict):
@@ -319,7 +325,7 @@ def normalize_report(raw: dict, scores: dict):
                 elif "EXP" in bureau:
                     normalized["scores"]["Experian"] = score
 
-    # Summary
+    # --- Summary ---
     stats = raw.get("statistics", {})
     if isinstance(stats, dict):
         normalized["summary"] = {
@@ -334,35 +340,29 @@ def normalize_report(raw: dict, scores: dict):
             "inquiries_2yrs": safe_number(stats.get("inquiriesLast2Years")),
         }
 
-    # Accounts
+    # --- Accounts ---
     trades = (raw.get("trades") or {}).get("trades", [])
     if isinstance(trades, dict):
         trades = [trades]
     for trade in trades:
         inst = trade.get("institution") or {}
         acct = {
-            "institution": {"name": inst.get("name") or trade.get("creditorName")},
-            "account_type": (
-                (trade.get("accountTypeObj") or {}).get("description")
-                or trade.get("accountTypeDescription")
-                or trade.get("accountType")
-                or trade.get("type")
-            ),
+            "institution": {"name": inst.get("name") or trade.get("creditorName") or trade.get("memberCodeShortName")},
+            "account_type": ((trade.get("accountTypeObj") or {}).get("description")
+                             or trade.get("accountTypeDescription")
+                             or trade.get("accountType")
+                             or trade.get("type")),
             "bureau": trade.get("creditorContactSource") or trade.get("bureau") or trade.get("source"),
-            "status": (
-                trade.get("accountStatus")
-                or trade.get("currentAccountRatingDisplay")
-                or trade.get("accountRating")
-            ),
-            "balance": safe_number(trade.get("currentBalanceAmount") or trade.get("balance")),
-            "credit_limit": safe_number(trade.get("creditLimitAmount")),
-            "high_balance": safe_number(trade.get("highCreditAmount")),
-            "open_date": trade.get("openDateFormatted"),
+            "status": (trade.get("accountStatus") or trade.get("currentAccountRatingDisplay") or trade.get("accountRating")),
+            "balance": safe_number(trade.get("currentBalance") or trade.get("currentBalanceAmount") or trade.get("balance")),
+            "credit_limit": safe_number(trade.get("creditLimit") or trade.get("creditLimitAmount")),
+            "high_balance": safe_number(trade.get("highBalance") or trade.get("highCreditAmount")),
+            "open_date": trade.get("openDate") or trade.get("openDateFormatted"),
             "closed_date": trade.get("dateClosed"),
             "last_payment_date": trade.get("dateLastPayment"),
-            "payment_amount": safe_number(trade.get("termsMonthlyPayment")),
+            "payment_amount": safe_number(trade.get("scheduledMonthlyPayment") or trade.get("termsMonthlyPayment")),
             "past_due": safe_number(trade.get("amountPastDue")),
-            "account_number": trade.get("maskedAccountNumber"),
+            "account_number": trade.get("maskedAccountNumber") or trade.get("accountNumber"),
             "payment_history": trade.get("paymentHistory"),
             "times_30_late": safe_number(trade.get("times30Late")),
             "times_60_late": safe_number(trade.get("times60Late")),
@@ -373,7 +373,7 @@ def normalize_report(raw: dict, scores: dict):
         }
         normalized["accounts"].append(acct)
 
-    # Inquiries
+    # --- Inquiries ---
     inqs = (raw.get("search_results") or {}).get("inquiries", [])
     if isinstance(inqs, dict):
         inqs = [inqs]
@@ -385,7 +385,7 @@ def normalize_report(raw: dict, scores: dict):
             "type": iq.get("inquiryType"),
         })
 
-    # Public records
+    # --- Public Records ---
     prs = (raw.get("search_results") or {}).get("publicRecords", [])
     if isinstance(prs, dict):
         prs = [prs]
@@ -397,13 +397,13 @@ def normalize_report(raw: dict, scores: dict):
             "amount": safe_number(pr.get("amount")),
         })
 
-    # Employers
-    employers = (cr_json.get("Borrower") or {}).get("Employer", []) or []
+    # --- Employers ---
+    employers = (cr_json.get("Borrower") or {}).get("Employer", [])
     if isinstance(employers, dict):
         employers = [employers]
     for emp in employers:
         normalized["employers"].append({
-            "name": emp.get("employerName"),
+            "name": emp.get("name") or emp.get("employerName"),
             "date_reported": emp.get("dateReported") or emp.get("dateUpdated"),
             "bureau": emp.get("bureau"),
         })
@@ -417,7 +417,7 @@ def normalize_report(raw: dict, scores: dict):
 @app.route("/fetch_report", methods=["POST"])
 @require_api_key
 def fetch_report():
-    """Return RAW and NORMALIZED SmartCredit data + scores."""
+    """Return both RAW and Normalized SmartCredit data."""
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"ok": False, "error": "Invalid JSON body"}), 400
@@ -431,24 +431,19 @@ def fetch_report():
 
     try:
         result = fetch_report_for_credentials(email, password, headless=bool(headless))
-        normalized = normalize_report(result["aggregated"], result["scores"])
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 401
     except Exception as e:
         return jsonify({"ok": False, "error": f"internal error: {e}"}), 500
 
-    return jsonify({
-        "ok": True,
-        "raw": result["aggregated"],
-        "normalized": normalized,
-        "scores": result["scores"]
-    }), 200
+    normalized = normalize_report(result["aggregated"], result["scores"])
+    return jsonify({"ok": True, "raw": result["aggregated"], "normalized": normalized, "scores": result["scores"]}), 200
 
 
 @app.route("/")
 @require_api_key
 def index():
-    return jsonify({"ok": True, "msg": "SmartCredit API. POST /fetch_report with {email,password}"}), 200
+    return jsonify({"ok": True, "msg": "SmartCredit fetch API. POST /fetch_report with {email,password}"}), 200
 
 
 # -----------------------------
