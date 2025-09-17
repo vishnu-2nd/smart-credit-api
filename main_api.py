@@ -258,7 +258,7 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
     scores = {}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context()
         page = context.new_page()
 
