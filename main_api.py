@@ -355,6 +355,80 @@ def fetch_report_for_credentials(email: str, password: str, headless: bool = PLA
         browser.close()
 
     return {"aggregated": aggregated, "scores": scores}
+def normalize_report(raw: dict, scores: dict):
+    """
+    Convert raw SmartCredit JSON into normalized structure.
+    Keeps summary, accounts, scores, inquiries, public records.
+    """
+
+    normalized = {
+        "scores": scores,
+        "summary": {},
+        "accounts": [],
+        "inquiries": [],
+        "public_records": []
+    }
+
+    # --- Scores ---
+    if scores:
+        normalized["scores"] = scores
+
+    # --- Summary (statistics endpoint) ---
+    stats = raw.get("statistics", {})
+    if isinstance(stats, dict):
+        normalized["summary"] = {
+            "total_accounts": stats.get("totalAccounts"),
+            "open_accounts": stats.get("openAccounts"),
+            "closed_accounts": stats.get("closedAccounts"),
+            "delinquent_accounts": stats.get("delinquentAccounts"),
+            "derogatory_accounts": stats.get("derogatoryAccounts"),
+            "total_balances": stats.get("totalBalances"),
+            "total_payments": stats.get("totalPayments"),
+            "public_records": stats.get("publicRecords"),
+            "inquiries_2yrs": stats.get("inquiriesLast2Years"),
+        }
+
+    # --- Accounts (trades endpoint) ---
+    trades = raw.get("trades", {}).get("trades", [])
+    for trade in trades:
+        acct = {
+            "account_name": trade.get("memberCodeShortName"),
+            "account_number": trade.get("accountNumber"),
+            "account_type": trade.get("accountType"),
+            "status": trade.get("accountRating"),
+            "balance": trade.get("currentBalance"),
+            "credit_limit": trade.get("creditLimit"),
+            "high_balance": trade.get("highBalance"),
+            "open_date": trade.get("openDate"),
+            "closed_date": trade.get("dateClosed"),
+            "last_payment_date": trade.get("dateLastPayment"),
+            "payment_amount": trade.get("scheduledMonthlyPayment"),
+            "past_due": trade.get("amountPastDue"),
+            "remarks": trade.get("accountRemark"),
+        }
+        normalized["accounts"].append(acct)
+
+    # --- Inquiries (search_results endpoint) ---
+    inqs = raw.get("search_results", {}).get("inquiries", [])
+    for iq in inqs:
+        normalized["inquiries"].append({
+            "bureau": iq.get("bureau"),
+            "business_name": iq.get("subscriberName"),
+            "inquiry_date": iq.get("inquiryDate"),
+            "type": iq.get("inquiryType")
+        })
+
+    # --- Public Records ---
+    pr = raw.get("search_results", {}).get("publicRecords", [])
+    for record in pr:
+        normalized["public_records"].append({
+            "type": record.get("type"),
+            "date_filed": record.get("dateFiled"),
+            "status": record.get("status"),
+            "amount": record.get("amount")
+        })
+
+    return normalized
 
 # -----------------------------
 # Routes
@@ -380,7 +454,9 @@ def fetch_report():
     except Exception as e:
         return jsonify({"ok": False, "error": f"internal error: {e}"}), 500
 
-    return jsonify({"ok": True, "data": result["aggregated"], "scores": result["scores"]}), 200
+    normalized = normalize_report(result["aggregated"], result["scores"])
+    return jsonify({"ok": True, "report": normalized}), 200
+
 
 @app.route("/")
 @require_api_key
